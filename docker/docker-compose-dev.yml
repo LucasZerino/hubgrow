@@ -1,0 +1,287 @@
+services:
+  # ============================================
+  # INFRAESTRUTURA
+  # ============================================
+  
+  postgres:
+    image: postgres:16-alpine
+    container_name: hubphp_postgres_dev
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${DB_DATABASE:-hubphp}
+      POSTGRES_USER: ${DB_USERNAME:-postgres}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-postgres}
+    volumes:
+      - postgres_dev_data:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    networks:
+      - hubphp-network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    container_name: hubphp_redis_dev
+    restart: unless-stopped
+    command: redis-server --requirepass ${REDIS_PASSWORD:-redis}
+    volumes:
+      - redis_dev_data:/data
+    ports:
+      - "6379:6379"
+    networks:
+      - hubphp-network
+
+  # Queue worker também roda localmente: php artisan queue:work
+  
+  mailhog:
+    image: mailhog/mailhog
+    container_name: hubphp_mailhog
+    restart: unless-stopped
+    ports:
+      - "1025:1025"
+      - "8025:8025"
+    networks:
+      - hubphp-network
+
+  # MinIO (S3-compatible storage) para armazenamento de mídias
+  minio:
+    image: minio/minio:latest
+    container_name: hubphp_minio_dev
+    restart: unless-stopped
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-minioadmin}
+      MINIO_BUCKET: ${MINIO_BUCKET:-hubphp}
+    volumes:
+      - minio_dev_data:/data
+    ports:
+      - "9000:9000"  # API endpoint
+      - "9001:9001"  # Console UI
+    networks:
+      - hubphp-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 30s
+      timeout: 20s
+      retries: 3
+
+  # Inicializador do MinIO (cria bucket e configura políticas)
+  minio-init:
+    image: minio/mc:latest
+    container_name: hubphp_minio_init_dev
+    restart: "no"
+    depends_on:
+      minio:
+        condition: service_healthy
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-minioadmin}
+      MINIO_BUCKET: ${MINIO_BUCKET:-hubphp}
+    entrypoint: /bin/sh
+    command:
+      - -c
+      - |
+        echo "Aguardando MinIO estar pronto..."
+        until mc alias set local http://minio:9000 $${MINIO_ROOT_USER} $${MINIO_ROOT_PASSWORD} 2>/dev/null; do
+          echo "Aguardando MinIO..."
+          sleep 2
+        done
+        echo "MinIO está pronto!"
+        BUCKET_NAME=$${MINIO_BUCKET:-hubphp}
+        if mc ls local/$${BUCKET_NAME} >/dev/null 2>&1; then
+          echo "Bucket $${BUCKET_NAME} já existe"
+        else
+          echo "Criando bucket: $${BUCKET_NAME}"
+          mc mb local/$${BUCKET_NAME}
+          echo "Bucket $${BUCKET_NAME} criado com sucesso!"
+        fi
+        echo "Configurando política pública para bucket: $${BUCKET_NAME}"
+        mc anonymous set download local/$${BUCKET_NAME}
+        echo "Política pública configurada!"
+        echo "MinIO inicializado com sucesso!"
+    networks:
+      - hubphp-network
+
+  # ============================================
+  # BACKEND (Laravel)
+  # ============================================
+  
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile.backend
+    container_name: hubphp_backend_dev
+    restart: unless-stopped
+    working_dir: /var/www
+    volumes:
+      - ../backend:/var/www
+      - backend_vendor:/var/www/vendor
+      - backend_node_modules:/var/www/node_modules
+    ports:
+      - "8000:8000"
+    environment:
+      - APP_ENV=local
+      - DB_CONNECTION=pgsql
+      - DB_HOST=postgres
+      - DB_PORT=5432
+      - DB_DATABASE=${DB_DATABASE:-hubphp}
+      - DB_USERNAME=${DB_USERNAME:-postgres}
+      - DB_PASSWORD=${DB_PASSWORD:-postgres}
+      - REDIS_CLIENT=predis
+      - REDIS_HOST=redis
+      - REDIS_PASSWORD=${REDIS_PASSWORD:-redis}
+      - REDIS_PORT=6379
+      - QUEUE_CONNECTION=database
+      - BROADCAST_CONNECTION=reverb
+      - REVERB_APP_ID=${REVERB_APP_ID:-689436}
+      - REVERB_APP_KEY=${REVERB_APP_KEY:-6odcfpxxdhvbjqarc3vk}
+      - REVERB_APP_SECRET=${REVERB_APP_SECRET:-h1eg4kuhekvllpvujmuk}
+      - REVERB_HOST=websockets
+      - REVERB_PORT=8080
+      - REVERB_SCHEME=http
+    networks:
+      - hubphp-network
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_started
+      websockets:
+        condition: service_healthy
+    command: >
+      sh -c "
+        composer install --no-interaction --prefer-dist &&
+        php artisan key:generate --force || true &&
+        php artisan migrate --force || echo 'Migrations already run' &&
+        php artisan serve --host=0.0.0.0 --port=8000
+      "
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:8000"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+  backend-queue:
+    build:
+      context: .
+      dockerfile: Dockerfile.backend
+    container_name: hubphp_backend_queue_dev
+    restart: unless-stopped
+    working_dir: /var/www
+    volumes:
+      - ../backend:/var/www
+      - backend_vendor:/var/www/vendor
+    environment:
+      - APP_ENV=local
+      - DB_CONNECTION=pgsql
+      - DB_HOST=postgres
+      - DB_PORT=5432
+      - DB_DATABASE=${DB_DATABASE:-hubphp}
+      - DB_USERNAME=${DB_USERNAME:-postgres}
+      - DB_PASSWORD=${DB_PASSWORD:-postgres}
+      - REDIS_CLIENT=predis
+      - REDIS_HOST=redis
+      - REDIS_PASSWORD=${REDIS_PASSWORD:-redis}
+      - REDIS_PORT=6379
+      - QUEUE_CONNECTION=database
+      - BROADCAST_CONNECTION=reverb
+      - REVERB_APP_ID=${REVERB_APP_ID:-689436}
+      - REVERB_APP_KEY=${REVERB_APP_KEY:-6odcfpxxdhvbjqarc3vk}
+      - REVERB_APP_SECRET=${REVERB_APP_SECRET:-h1eg4kuhekvllpvujmuk}
+      - REVERB_HOST=websockets
+      - REVERB_PORT=8080
+      - REVERB_SCHEME=http
+    networks:
+      - hubphp-network
+    depends_on:
+      - postgres
+      - redis
+      - backend
+      - websockets
+    command: >
+      sh -c "
+        echo 'Waiting for backend to be ready...' &&
+        sleep 10 &&
+        echo 'Starting queue worker...' &&
+        php artisan queue:work --queue=low,medium,high,default --verbose --tries=3 --timeout=90
+      "
+
+  # ============================================
+  # WEBSOCKET SERVER (Laravel Reverb)
+  # ============================================
+  
+  websockets:
+    build:
+      context: .
+      dockerfile: Dockerfile.backend
+    container_name: hubphp_websockets_dev
+    restart: unless-stopped
+    working_dir: /var/www
+    volumes:
+      - ../backend:/var/www
+      - backend_vendor:/var/www/vendor
+    ports:
+      - "8080:8080"
+    environment:
+      - APP_ENV=local
+      - DB_CONNECTION=pgsql
+      - DB_HOST=postgres
+      - DB_PORT=5432
+      - DB_DATABASE=${DB_DATABASE:-hubphp}
+      - DB_USERNAME=${DB_USERNAME:-postgres}
+      - DB_PASSWORD=${DB_PASSWORD:-postgres}
+      - REDIS_CLIENT=predis
+      - REDIS_HOST=redis
+      - REDIS_PASSWORD=${REDIS_PASSWORD:-redis}
+      - REDIS_PORT=6379
+      - REVERB_APP_ID=${REVERB_APP_ID:-689436}
+      - REVERB_APP_KEY=${REVERB_APP_KEY:-6odcfpxxdhvbjqarc3vk}
+      - REVERB_APP_SECRET=${REVERB_APP_SECRET:-h1eg4kuhekvllpvujmuk}
+      - REVERB_HOST=0.0.0.0
+      - REVERB_PORT=8080
+      - REVERB_SCHEME=http
+      - BROADCAST_CONNECTION=reverb
+    networks:
+      - hubphp-network
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_started
+    command: >
+      sh -c "
+        composer install --no-interaction --prefer-dist &&
+        php artisan key:generate --force || true &&
+        php artisan migrate --force || echo 'Migrations already run' &&
+        php artisan reverb:start --host=0.0.0.0 --port=8080
+      "
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:8080"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+  # ============================================
+  # FRONTEND (React + Vite)
+  # ============================================
+  # Frontend removido do Docker - rodando localmente com npm para facilitar desenvolvimento
+  # Para rodar: cd frontend && npm run dev
+
+volumes:
+  postgres_dev_data:
+  redis_dev_data:
+  minio_dev_data:
+  backend_vendor:
+  backend_node_modules:
+
+networks:
+  hubphp-network:
+    driver: bridge
+
