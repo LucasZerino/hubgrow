@@ -1,0 +1,23 @@
+{
+  "watch": [
+    "app",
+    "config",
+    "routes",
+    "database/migrations",
+    "database/seeders",
+    "resources/views"
+  ],
+  "ext": "php",
+  "ignore": [
+    "node_modules",
+    "vendor",
+    "storage",
+    "bootstrap/cache",
+    "tests"
+  ],
+  "exec": "php artisan serve --host=127.0.0.1 --port=8000",
+  "env": {
+    "APP_ENV": "local"
+  }
+}
+

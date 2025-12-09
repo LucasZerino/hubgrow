@@ -1,0 +1,25 @@
+{
+    "$schema": "https://www.schemastore.org/package.json",
+    "private": true,
+    "type": "module",
+    "scripts": {
+        "build": "vite build",
+        "dev": "vite",
+        "serve": "php artisan serve --host=127.0.0.1 --port=8000",
+        "serve:watch": "nodemon --exec \"php artisan serve --host=127.0.0.1 --port=8000\" --watch app --watch config --watch routes --ext php",
+        "dev:full": "concurrently -c \"#93c5fd,#c4b5fd\" \"npm run serve:watch\" \"npm run dev\" --names=server,vite"
+    },
+    "devDependencies": {
+        "@tailwindcss/vite": "^4.0.0",
+        "axios": "^1.11.0",
+        "concurrently": "^9.0.1",
+        "laravel-vite-plugin": "^2.0.0",
+        "nodemon": "^3.1.0",
+        "tailwindcss": "^4.0.0",
+        "vite": "^7.0.7"
+    },
+    "dependencies": {
+        "laravel-echo": "^2.2.6",
+        "pusher-js": "^8.4.0"
+    }
+}
